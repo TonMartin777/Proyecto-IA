@@ -4,9 +4,9 @@ import sys
 import math
 
 # --- CONFIGURACIÓN GRÁFICA ---
-CELL_SIZE = 20  # Tamaño de celda reducido
-COLS = 60       # Ampliado a 60 columnas
-ROWS = 30       # Ampliado a 30 filas
+CELL_SIZE = 20  
+COLS = 60       
+ROWS = 30       
 WIDTH = COLS * CELL_SIZE
 HEIGHT = ROWS * CELL_SIZE
 
@@ -17,7 +17,7 @@ GRAY = (200, 200, 200)
 BLUE = (50, 100, 255)
 RED = (220, 50, 50)
 YELLOW = (255, 215, 0)
-VISION_COLOR = (0, 180, 150, 90)
+VISION_COLOR = (0, 180, 150, 90) 
 
 class GameEnvironment:
     def __init__(self, width, height):
@@ -34,8 +34,13 @@ class GameEnvironment:
     def set_goal(self, x, y):
         self.goal_pos = (x, y)
 
-    def add_enemy(self, x, y, dx=0, dy=1):
-        self.enemies.append({'pos': (x, y), 'dir': (dx, dy)})
+    def add_enemy(self, x, y, dx=0, dy=1, patrol_route=None):
+        self.enemies.append({
+            'pos': (x, y), 
+            'dir': (dx, dy),
+            'patrol_route': patrol_route if patrol_route else [],
+            'patrol_index': 0
+        })
 
     def add_obstacle_rect(self, start_x, start_y, width, height):
         for x in range(start_x, start_x + width):
@@ -66,9 +71,9 @@ class GameEnvironment:
 
     def calculate_vision_cones(self):
         vision_cells = set()
-        VIEW_RADIUS = 12
-        FOV_ANGLE = math.radians(45)
-        HALF_FOV = FOV_ANGLE / 2
+        VIEW_RADIUS = 18
+        FOV_ANGLE = math.radians(60) 
+        HALF_FOV = FOV_ANGLE / 3
 
         for enemy in self.enemies:
             ex, ey = enemy['pos']
@@ -81,24 +86,67 @@ class GameEnvironment:
                         continue
                     
                     dist = math.hypot(x - ex, y - ey)
+                    
+                    # 1. Filtro inicial amplio por distancia máxima
                     if dist <= VIEW_RADIUS:
                         cell_angle = math.atan2(y - ey, x - ex)
                         angle_diff = abs(math.atan2(math.sin(cell_angle - enemy_angle), 
                                                     math.cos(cell_angle - enemy_angle)))
                         
+                        # 2. Comprobar si está dentro del abanico angular
                         if angle_diff <= HALF_FOV:
-                            if self.has_line_of_sight(ex, ey, x, y):
-                                vision_cells.add((x, y))
+                            
+                            # 3. EL REDONDEO: Reducir el alcance efectivo en los bordes del cono.
+                            # Si el ángulo se acerca al límite (HALF_FOV), el radio permitido es menor.
+                            # math.cos( (angle_diff / HALF_FOV) * (math.pi / 2) ) crea una curva suave.
+                            effective_radius = VIEW_RADIUS * math.cos((angle_diff / HALF_FOV) * (math.pi / 4))
+                            
+                            if dist <= effective_radius:
+                                if self.has_line_of_sight(ex, ey, x, y):
+                                    vision_cells.add((x, y))
         return vision_cells
+
+    def update_enemy_patrols(self):
+        for enemy in self.enemies:
+            if not enemy['patrol_route']:
+                continue # Si no tiene ruta de patrulla, se queda quieto (puede rotar si se desea)
+
+            ex, ey = enemy['pos']
+            route = enemy['patrol_route']
+            target_x, target_y = route[enemy['patrol_index']]
+
+            # Si el enemigo ya está en el punto destino, cambia al siguiente punto
+            if ex == target_x and ey == target_y:
+                enemy['patrol_index'] = (enemy['patrol_index'] + 1) % len(route)
+                target_x, target_y = route[enemy['patrol_index']]
+
+            # Calcular la dirección del movimiento hacia el objetivo (en línea recta)
+            dx = 0
+            if target_x > ex: dx = 1
+            elif target_x < ex: dx = -1
+            
+            dy = 0
+            if target_y > ey: dy = 1
+            elif target_y < ey: dy = -1
+
+            # Calcular el siguiente paso
+            next_x, next_y = ex + dx, ey + dy
+            
+            # Verificar colisiones con obstáculos o bordes del mapa
+            # En una patrulla simple, si choca, debería detenerse (o recalcular con A* después)
+            if 0 <= next_x < self.width and 0 <= next_y < self.height and (next_x, next_y) not in self.obstacles:
+                enemy['pos'] = (next_x, next_y)
+                enemy['dir'] = (dx, dy) # La visión se alinea con el movimiento
+
 
     def run_simulation(self):
         pygame.init()
         screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("Simulador de Sigilo - Entorno Masivo (60x30)")
+        pygame.display.set_caption("Simulador de Sigilo - Patrullas Dinámicas")
         clock = pygame.time.Clock()
         vision_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
 
-        turn_delay = 500
+        turn_delay = 300 # Reducido un poco para que el movimiento sea fluido
         last_turn_time = pygame.time.get_ticks()
         running = True
 
@@ -109,10 +157,8 @@ class GameEnvironment:
 
             current_time = pygame.time.get_ticks()
             if current_time - last_turn_time > turn_delay:
-                # Rotación enemiga aleatoria para testear el rebote de la visión en los muros
-                for enemy in self.enemies:
-                    if random.random() < 0.20:
-                        enemy['dir'] = random.choice([(0, -1), (0, 1), (-1, 0), (1, 0)])
+                # Actualizar la posición y dirección de los enemigos según sus patrullas
+                self.update_enemy_patrols()
                 last_turn_time = current_time
 
             screen.fill(WHITE)
@@ -122,10 +168,8 @@ class GameEnvironment:
             for y in range(self.height):
                 for x in range(self.width):
                     rect = pygame.Rect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
-                    # Dibujar líneas de cuadrícula muy tenues
                     pygame.draw.rect(screen, (220, 220, 220), rect, 1)
                     if (x, y) in self.obstacles:
-                        # Rellenar los bloques macizos
                         pygame.draw.rect(screen, BLACK, rect)
             
             # Dibujar Meta
@@ -162,43 +206,31 @@ if __name__ == "__main__":
     env = GameEnvironment(COLS, ROWS)
     
     # --- CREACIÓN DEL ESCENARIO A GRAN ESCALA (60x30) ---
-    # add_obstacle_rect(x_inicial, y_inicial, ancho_columnas, alto_filas)
-    
-    # Complejo Noroeste
     env.add_obstacle_rect(5, 5, 15, 5)
     env.add_obstacle_rect(5, 15, 5, 10)
-    
-    # Gran Pabellón Central
     env.add_obstacle_rect(25, 5, 10, 20)
-    
-    # Zonas Este y Sureste
     env.add_obstacle_rect(40, 10, 15, 5)
     env.add_obstacle_rect(45, 20, 5, 8)
     env.add_obstacle_rect(15, 20, 5, 5)
     
-    # Posición inicial del Agente (Esquina superior izquierda)
     env.set_agent(2, 2)
-    
-    # Posición de la Meta (Esquina inferior derecha)
     env.set_goal(57, 27)
     
     # --- PATRULLAS ENEMIGAS ---
-    # Vigila el pasillo entre el complejo noroeste y el pabellón central
-    env.add_enemy(22, 10, dx=0, dy=1)    
+    # Patrulla horizontal de lado a lado
+    env.add_enemy(22, 10, dx=0, dy=1, patrol_route=[(22, 10), (22, 25), (22, 10)])    
     
-    # Vigila el corredor superior derecho
-    env.add_enemy(48, 5, dx=-1, dy=0)  
+    # Patrulla a lo largo de un pasillo ancho
+    env.add_enemy(48, 5, dx=-1, dy=0, patrol_route=[(48, 5), (38, 5), (48, 5)])  
     
-    # Cubre el espacio estrecho entre el pabellón central y la zona este
-    env.add_enemy(37, 15, dx=0, dy=-1) 
+    # Patrulla vertical entre edificios
+    env.add_enemy(37, 15, dx=0, dy=-1, patrol_route=[(37, 15), (37, 28), (37, 15)]) 
     
-    # Vigila la parte inferior del mapa
-    env.add_enemy(30, 27, dx=-1, dy=0) 
+    # Patrulla cerca de la zona final
+    env.add_enemy(30, 27, dx=-1, dy=0, patrol_route=[(30, 27), (15, 27), (30, 27)]) 
     
-    # Guardia en la esquina suroeste
+    # Guardias estáticos (sin ruta, solo vigilan una dirección)
     env.add_enemy(8, 27, dx=1, dy=0)
-    
-    # Guardia protegiendo la aproximación final a la meta
     env.add_enemy(54, 22, dx=0, dy=1)
     
     env.run_simulation()
